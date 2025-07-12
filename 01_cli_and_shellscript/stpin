@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+OFFSET=512
+GPIO=("$@")
+NUM_GPIO=${#GPIO[@]}
+if [ $NUM_GPIO == 0 ]; then
+	echo "Not agrument"
+	exit 1
+fi
+MODE=${GPIO[$NUM_GPIO-1]}
+unset GPIO[$NUM_GPIO-1]
+echo $MODE
+if [ -z "$MODE" ] || ( [ "$MODE" != "out" ] && [ "$MODE" != "in" ] ); then 
+	echo "Not Mode , Mode is outg for output or ing for input"
+else
+	for i in "${GPIO[@]}"; do
+		GPIO_PATH=/sys/class/gpio/gpio$((i + $OFFSET))/direction
+		echo $MODE > $GPIO_PATH
+		echo "GPIO $((i + $OFFSET)) is set to $MODE"
+	done
+	exit 0
+fi
+echo "Command standar: stpin 1 2 3 ... out/in"
+exit 1

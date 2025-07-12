@@ -1,0 +1,15 @@
+#!/bin/bash
+OFFSET=512
+GPIO=$1
+VAL=$2
+if [ -z "$GPIO" ]; then
+	echo "Not Pin, please add num of pin , not nesscary addtion offset"
+elif [ -z "$VAL" ]; then
+	echo "Not VAL , please add 1 for HIGH and 0 for LOW"
+else
+	echo $VAL > /sys/class/gpio/gpio$((GPIO + OFFSET))/value
+	exit 0
+fi
+echo "Command standar: wrpin NUM_PIN 0/1"
+exit 1
+

@@ -1,0 +1,12 @@
+#!/bin/bash
+OFFSET=512
+GPIO=$1
+if [ -z "$GPIO" ]; then
+	echo "Not Pin, please add num of pin , not nesscary addtion offset"
+else
+	cat /sys/class/gpio/gpio$((GPIO + OFFSET))/value
+	exit 0
+fi
+echo "Command standar: rdpin NUM_PIN"
+exit 1
+

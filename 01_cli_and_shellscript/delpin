@@ -1,0 +1,9 @@
+#!/bin/bash
+OFFSET=512
+GPIO=$1
+if [ -z "$GPIO" ]; then
+	echo "Not agrument"
+else
+	echo "GPIO $GPIO is deleted"
+fi
+echo $((OFFSET+GPIO)) > /sys/class/gpio/unexport
