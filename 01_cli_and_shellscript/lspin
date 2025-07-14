@@ -1,2 +1,2 @@
  #!/bin/bash
-ls /sys/class/gpio | grep  gpio* | grep gpiochip*
+cat /sys/kernel/debug/gpio
