@@ -1,4 +1,6 @@
 #include "stdio.h"
+#include "stddef.h"
+#undef offsetof
 #define offsetof(TYPE, MEMBER) ((size_t) &((TYPE *)0)->MEMBER)
 #define container_of(ptr, type, member) ({          \
     const typeof( ((type *)0)->member ) *__mptr = (ptr); \
@@ -44,5 +46,7 @@ int main(int argc, char *argv[])
 		6)  (struct some_data*) is just a typecasting to the struct we want to get.
     */
     printf ("From data1: %d\n", data1->d);
+    /* Check memory layout (should be 12 like we guessed)*/
+    printf ("Size of struct: %zu\n",sizeof(struct some_data));  
 }
 
