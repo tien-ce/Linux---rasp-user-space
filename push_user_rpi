@@ -1,0 +1,48 @@
+#!/bin/bash
+# push.sh - Copy file to Raspberry Pi maintaining the parent folder structure
+
+set -euo pipefail
+
+# Configuration
+SSH_HOST="rpi4" 
+BASE_DEST="/home/vantien/user_space"
+
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <path-to-file>"
+    exit 1
+fi
+
+# 1. Get absolute path of the source file
+SRC_ABS=$(realpath "$1")
+
+if [ ! -f "$SRC_ABS" ]; then
+    echo "Error: '$SRC_ABS' is not a regular file."
+    exit 2
+fi
+
+# 2. Extract components
+# Example: /data200/kernel-modulle-raspi4/16_pcd_platform_dt/main.c
+FILE_NAME=$(basename "$SRC_ABS")           # main.c
+PARENT_DIR=$(dirname "$SRC_ABS")           # /data200/kernel-modulle-raspi4/16_pcd_platform_dt
+FOLDER_NAME=$(basename "$PARENT_DIR")      # 16_pcd_platform_dt
+
+# 3. Construct Destination
+# Example: /home/vantien/16_pcd_platform_dt/
+FINAL_DEST="${BASE_DEST}/${FOLDER_NAME}/"
+
+echo "Detected Parent Folder: $FOLDER_NAME"
+echo "Target Destination: ${SSH_HOST}:${FINAL_DEST}${FILE_NAME}"
+
+# 4. Create remote directory if it doesn't exist
+# This avoids 'No such file or directory' errors if the folder isn't there yet
+ssh "$SSH_HOST" "mkdir -p $FINAL_DEST"
+
+# 5. Perform the copy
+scp "$SRC_ABS" "${SSH_HOST}:${FINAL_DEST}"
+
+if [ $? -eq 0 ]; then
+    echo "Transfer completed successfully."
+else
+    echo "Transfer failed."
+    exit 4
+fi
