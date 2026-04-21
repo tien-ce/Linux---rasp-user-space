@@ -5,8 +5,8 @@ User-space application for reading CO/PM sensor data via the Modbus RTU kernel d
 ## Overview
 
 This application acts as a thin client to the kernel Modbus RTU driver. It:
-1. Configures kernel-side parameters (timeout, sampling interval) by writing control frames to the character device.
-2. Polls CO sensor readings from `/dev/co_sensor` in a 1-second loop.
+1. Configures kernel-side parameters (timeout, sampling interval) by writing control frames to `/dev/co_sensor`.
+2. Polls CO concentration from `/dev/co_sensor` and PM1.0 / PM2.5 concentration from `/dev/pm_sensor` in a 1-second loop.
 
 All Modbus RTU protocol handling (frame construction, CRC, RS485 timing) runs in kernel space. This application only interacts with the exposed character devices.
 
@@ -91,10 +91,12 @@ Copy `main_app` to the Raspberry Pi and run:
 Expected output:
 
 ```
-Success: Config 0x01 wrote 5 bytes to /dev/co_sensor
 Success: Config 0x02 wrote 5 bytes to /dev/co_sensor
+Success: Config 0x01 wrote 5 bytes to /dev/co_sensor
 Read CO value: 312
+PM1.0: 8, PM2.5: 12
 Read CO value: 315
+PM1.0: 8, PM2.5: 11
 ...
 ```
 
@@ -106,8 +108,8 @@ Parameters are sent to the kernel driver as 5-byte control frames at startup.
 
 | Parameter | Function Code | Default  | Description |
 |-----------|---------------|----------|-------------|
-| Timeout   | `0x01`        | 100 ms   | Modbus response wait timeout |
-| Interval  | `0x02`        | 1000 ms  | Minimum re-query interval (kernel cache TTL) |
+| Interval  | `0x01`        | 1000 ms  | Minimum re-query interval (kernel cache TTL) |
+| Timeout   | `0x02`        | 100 ms   | Modbus response wait timeout |
 
 > **Note on interval:** The kernel driver caches the last sensor reading and only re-issues a Modbus query after `interval` milliseconds. If multiple processes read the device simultaneously, they share this cache. Setting a very low interval increases RS485 bus load.
 
@@ -123,15 +125,22 @@ Bytes 1–4  : 32-bit unsigned value, little-endian (LSB first)
 Example — set timeout to 100 ms (`0x00000064`):
 
 ```
-{0x01, 0x64, 0x00, 0x00, 0x00}
+{0x02, 0x64, 0x00, 0x00, 0x00}
+```
+
+Example — set interval to 1000 ms (`0x000003E8`):
+
+```
+{0x01, 0xE8, 0x03, 0x00, 0x00}
 ```
 
 ## File Structure
 
 ```
 05_device_modbus/
-├── main.c      — application entry point and sensor polling loop
+├── main.c      — application entry point, sensor polling loop (CO + PM)
 ├── config.h    — device paths, function codes, constants
+├── GUIDE.txt   — detailed application and interface guide
 └── Makefile    — cross-compile and install targets
 ```
 
