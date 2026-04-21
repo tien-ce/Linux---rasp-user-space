@@ -11,6 +11,6 @@ typedef enum MODBUS_DEVICE
 #define CO_DEVICE_PATH		"/dev/co_sensor"
 #define PM_DEVICE_PATH		"/dev/pm_sensor"
 #define CONFIG_BYTES		5
-#define TIMEOUT_FUNC		0x01
-#define INTERVAL_FUNC		0x02
+#define INTERVAL_FUNC		0x01
+#define TIMEOUT_FUNC		0x02
 #endif // _MODBUS_DEVICE_CONF_
