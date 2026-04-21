@@ -1,0 +1,475 @@
+==============================================================================
+  User-Space Modbus Sensor Client — Application Guide
+  Raspberry Pi 4 · Linux 6.12 · arm64
+  Author: Van Tien <tien11102004@gmail.com>
+==============================================================================
+
+This document explains how this user-space application interacts with the
+Modbus RTU kernel driver.  It covers what the application does, how the
+character device interface works, the binary control frame format, the
+sensor data format, and common pitfalls.
+
+For the kernel-side interface reference (sysfs paths, cache behaviour,
+error codes, concurrency), see USERGUIDE.txt in the companion kernel repo:
+  https://github.com/tien-ce/kernel-modulle-raspi4/tree/main/17_modbus_rtu
+
+------------------------------------------------------------------------------
+  TABLE OF CONTENTS
+------------------------------------------------------------------------------
+
+  1.  What This Application Does
+  2.  Required Kernel Setup
+  3.  Build and Deploy
+  4.  Application Flow
+  5.  Writing Configuration — Control Frame Format
+  6.  Reading Sensor Data — Character Device Format
+        6.1  CO Sensor
+        6.2  PM Sensor
+  7.  Endianness
+  8.  Error Handling
+  9.  Sysfs Alternative (Shell)
+  10. Extending the Application
+  11. System Parameters — interval_time and timeout
+  12. Conclusion
+
+
+==============================================================================
+  1.  WHAT THIS APPLICATION DOES
+==============================================================================
+
+main_app is a minimal polling client that:
+
+  1. Configures the kernel driver's timeout and interval parameters for
+     the CO sensor by writing 5-byte control frames to /dev/co_sensor.
+
+  2. Enters an infinite loop, reading CO concentration from /dev/co_sensor
+     and PM1.0 / PM2.5 concentration from /dev/pm_sensor every second.
+
+  3. Prints the values to stdout.  On error it prints to stderr and
+     continues (does not exit).
+
+All Modbus RTU protocol work (frame encoding, CRC, RS485 bus arbitration,
+slave response parsing) runs inside the kernel modules.  This application
+only uses standard POSIX read() / write() on character device files.
+
+
+==============================================================================
+  2.  REQUIRED KERNEL SETUP
+==============================================================================
+
+The following must be done on the Raspberry Pi before running main_app.
+
+  a) Apply the Device Tree overlay (once per boot, or add to config.txt):
+       sudo dtoverlay rs485_overlay.dtbo
+
+  b) Load the controller module first (it exports symbols the device module
+     needs):
+       sudo insmod modbus_controller_module.ko
+
+  c) Load the device module:
+       sudo insmod modbus_device_module.ko
+
+  d) Verify the character devices exist:
+       ls -l /dev/co_sensor /dev/pm_sensor
+
+  If any of these steps are skipped, open() calls in the application will
+  fail with ENOENT.
+
+  Default driver parameters at probe time:
+    interval_time = 1000 ms   (kernel re-queries bus only after this delay)
+    timeout       = 100 ms    (how long the driver waits for a slave reply)
+
+
+==============================================================================
+  3.  BUILD AND DEPLOY
+==============================================================================
+
+On the cross-compile host:
+
+  make            Build main_app (ARM64 binary)
+  make clean      Remove main_app and *.o
+  make install    Push main_app to the Raspberry Pi (uses push_user_rpi)
+
+The Makefile uses:
+  CC            = aarch64-linux-gnu-gcc
+  CFLAGS        = -Wall -Wextra -O2
+
+The only source files are main.c and config.h — no external libraries.
+
+On the Raspberry Pi:
+  ./main_app
+
+
+==============================================================================
+  4.  APPLICATION FLOW
+==============================================================================
+
+  main()
+    │
+    ├─ write_config(CO_SENSOR, TIMEOUT_FUNC, 100)
+    │    └─ opens /dev/co_sensor O_WRONLY
+    │    └─ builds 5-byte frame: [0x02, 0x64, 0x00, 0x00, 0x00]
+    │    └─ write() → kernel sets timeout = 100 ms for co_sensor
+    │    └─ closes fd
+    │
+    ├─ write_config(CO_SENSOR, INTERVAL_FUNC, 1000)
+    │    └─ opens /dev/co_sensor O_WRONLY
+    │    └─ builds 5-byte frame: [0x01, 0xE8, 0x03, 0x00, 0x00]
+    │    └─ write() → kernel sets interval_time = 1000 ms for co_sensor
+    │    └─ closes fd
+    │
+    └─ loop every 1 second
+         ├─ read_co_value()
+         │    └─ opens /dev/co_sensor O_RDONLY
+         │    └─ read() → 2 bytes big-endian uint16_t
+         │    └─ converts to host uint16_t
+         │    └─ prints "Read CO value: <n>"
+         │    └─ closes fd
+         │
+         └─ read_pm_value()
+              └─ opens /dev/pm_sensor O_RDONLY
+              └─ read() → 4 bytes: PM1.0 [0–1], PM2.5 [2–3], big-endian
+              └─ converts each pair to host uint16_t
+              └─ prints "PM1.0: <n>, PM2.5: <n>"
+              └─ closes fd
+
+
+==============================================================================
+  5.  WRITING CONFIGURATION — CONTROL FRAME FORMAT
+==============================================================================
+
+Writes to a character device configure that device's runtime parameters
+inside the kernel.  They do NOT communicate with the Modbus slave.
+
+Frame layout (exactly 5 bytes, little-endian value):
+
+  Byte 0      : function code (1 byte)
+  Bytes 1–4   : 32-bit unsigned value, little-endian (LSB first)
+
+Function codes (defined in config.h):
+
+  INTERVAL_FUNC  0x01   Set interval_time in milliseconds
+  TIMEOUT_FUNC   0x02   Set timeout in milliseconds
+
+Examples:
+
+  Set interval_time = 1000 ms (0x000003E8):
+    {0x01, 0xE8, 0x03, 0x00, 0x00}
+
+  Set timeout = 100 ms (0x00000064):
+    {0x02, 0x64, 0x00, 0x00, 0x00}
+
+The frame is built by raw_package() and sent by write_config() in main.c.
+The write() call must deliver all 5 bytes in one call — the kernel rejects
+any buffer that is not exactly 5 bytes with EINVAL.
+
+  interval_time:
+    The kernel caches the last sensor reading.  It only re-issues a Modbus
+    bus transaction after interval_time milliseconds have elapsed.  Reads
+    within the window return the cached value instantly.
+    Set this to match your desired poll rate to avoid unnecessary bus load.
+
+  timeout:
+    How long (in ms) the kernel waits for a Modbus slave response before
+    returning ETIMEDOUT.  100 ms is a reasonable default for a local RS485
+    bus at 9600 baud.  Increase if the slave is slow to respond.
+
+Note: write_config() only configures the device you pass it.  To configure
+pm_sensor separately, call write_config(PM_SENSOR, ...).
+
+
+==============================================================================
+  6.  READING SENSOR DATA — CHARACTER DEVICE FORMAT
+==============================================================================
+
+read() on a character device returns raw register data from the Modbus
+slave.  The kernel driver packs each register value as a uint16_t in
+big-endian byte order (MSB first, as the Modbus specification requires).
+
+------------------------------------------------------------------------------
+  6.1  CO Sensor  (/dev/co_sensor)
+------------------------------------------------------------------------------
+
+  Register count : 1
+  Read buffer    : 2 bytes
+
+  Layout:
+    buffer[0]   MSB of CO concentration
+    buffer[1]   LSB of CO concentration
+
+  Conversion to uint16_t (host):
+    co_value = (buffer[0] << 8) | buffer[1];
+
+  Unit: raw ADC / sensor-specific count — check the CO sensor datasheet
+  for the conversion formula from raw counts to ppm.
+
+------------------------------------------------------------------------------
+  6.2  PM Sensor  (/dev/pm_sensor)
+------------------------------------------------------------------------------
+
+  Register count : 2 (default, without CONFIG_PM_SENSOR_PM10)
+                   3 (with CONFIG_PM_SENSOR_PM10 enabled in kernel build)
+  Read buffer    : 4 bytes (default) / 6 bytes (with PM10)
+
+  Layout (default, 4 bytes):
+    buffer[0]   PM1.0 MSB
+    buffer[1]   PM1.0 LSB
+    buffer[2]   PM2.5 MSB
+    buffer[3]   PM2.5 LSB
+
+  Conversion:
+    pm1_0 = (buffer[0] << 8) | buffer[1];
+    pm2_5 = (buffer[2] << 8) | buffer[3];
+
+  Layout (with PM10, 6 bytes):
+    buffer[4]   PM10 MSB
+    buffer[5]   PM10 LSB
+
+  Unit: µg/m³ (micrograms per cubic metre) — standard for PM sensors.
+
+Important: always read the full buffer in a single read() call.  The
+kernel's internal file-position counter advances by sizeof(uint16_t) per
+element.  A partial read leaves the position mid-buffer and the next read
+will return wrong data.  The simplest pattern is open → read → close per
+polling cycle (as implemented in this application).  If you reuse an fd,
+call lseek(fd, 0, SEEK_SET) before each read.
+
+
+==============================================================================
+  7.  ENDIANNESS
+==============================================================================
+
+Two endianness domains are involved:
+
+  Modbus wire / kernel buffer   —   BIG-ENDIAN (MSB first)
+    The Modbus specification requires registers transmitted MSB first.
+    The kernel stores register data exactly as received from the slave.
+
+  Control frame value field     —   LITTLE-ENDIAN (LSB first)
+    The 32-bit value in the 5-byte config frame is stored LSB first.
+    This is the native byte order of the ARM64 Raspberry Pi 4.
+    raw_package() handles this explicitly.
+
+Summary table:
+
+  Direction             Byte order     Who handles it
+  ------------------    -----------    -------------------------
+  Sensor read buffer    Big-endian     Caller (see section 6)
+  Config write value    Little-endian  raw_package() in main.c
+
+
+==============================================================================
+  8.  ERROR HANDLING
+==============================================================================
+
+Both write_config() and read_co_value() / read_pm_value() return bool.
+On failure they call the ERROR() macro which prints to stderr:
+
+  ERROR(fmt, ...) expands to:
+    fprintf(stderr, "<fmt>: <strerror(errno)>\n", ...)
+
+Common errors returned by the kernel driver:
+
+  ETIMEDOUT (110)
+    The Modbus slave did not respond within the configured timeout.
+    Check: slave power, RS485 wiring, slave address in the DTS, baud rate.
+
+  EPROTO (71)
+    The slave responded but the CRC was invalid, or the slave address in
+    the response did not match.  Check: baud rate mismatch (must be 9600),
+    RS485 bus noise.
+
+  EINVAL (22)
+    write() buffer was not exactly 5 bytes, or lseek() position out of
+    range.
+
+  ENOSYS (38)
+    The function code byte (byte 0) was not 0x01 or 0x02.
+
+  ENOENT (2)
+    The device file does not exist — kernel module not loaded or DTS
+    overlay not applied.
+
+The application treats all errors as non-fatal in the polling loop: it
+prints to stderr and continues.  The initial configuration writes in
+main() are fatal — the application exits if they fail.
+
+
+==============================================================================
+  9.  SYSFS ALTERNATIVE (SHELL)
+==============================================================================
+
+The same sensor data and configuration are accessible via sysfs without
+compiling any code.  Both interfaces share the same kernel cache.
+
+  Read sensor values:
+    cat /sys/class/modbusclass/co_sensor/co_value
+    cat /sys/class/modbusclass/pm_sensor/pm1_0_value
+    cat /sys/class/modbusclass/pm_sensor/pm2_5_value
+
+  Configure interval and timeout (shell):
+    echo 1000 | sudo tee /sys/class/modbusclass/co_sensor/interval_time
+    echo 100  | sudo tee /sys/class/modbusclass/co_sensor/timeout
+
+  Read current configuration:
+    cat /sys/class/modbusclass/co_sensor/interval_time
+    cat /sys/class/modbusclass/co_sensor/timeout
+    cat /sys/class/modbusclass/co_sensor/slave_address
+
+Sysfs values are ASCII decimal with a trailing newline.
+sysfs writes accept plain decimal strings (kstrtou32 parsing).
+
+
+==============================================================================
+  10. EXTENDING THE APPLICATION
+==============================================================================
+
+  Add PM10 reading:
+    Enable CONFIG_PM_SENSOR_PM10 in the kernel build (make menuconfig in
+    17_modbus_rtu), rebuild and reload the module.  In user-space, extend
+    read_pm_value() to use a 6-byte buffer and extract bytes [4–5].
+
+  Configure pm_sensor parameters:
+    Call write_config(PM_SENSOR, TIMEOUT_FUNC, ...) and
+    write_config(PM_SENSOR, INTERVAL_FUNC, ...).  Currently only co_sensor
+    is configured at startup.
+
+  Implement user-space polling interval:
+    The comment in main() notes that setting interval_time too low causes
+    extra bus load.  A better pattern is to keep interval_time at 0 (always
+    fresh) or a short value, and control the poll rate with sleep() /
+    nanosleep() in user space, so the kernel only hits the bus when you
+    actually request data.
+
+  Per-process file descriptors:
+    Each thread should open its own fd.  The file position (f_pos) is per
+    fd and is not thread-safe across shared fds.
+
+==============================================================================
+  11. SYSTEM PARAMETERS — interval_time AND timeout
+==============================================================================
+
+These two parameters control the kernel driver's behaviour for each sensor
+device independently.  Their defaults at probe time are:
+
+  interval_time = 1000 ms
+  timeout       = 100  ms
+
+Understanding them correctly — especially in relation to the read cache — is
+important before deciding how and when to set them.
+
+------------------------------------------------------------------------------
+  11.1  interval_time
+------------------------------------------------------------------------------
+
+The kernel driver maintains a per-device read cache.  When a read is
+requested (from /dev or sysfs), the driver computes:
+
+  elapsed = now − last_successful_read
+
+  elapsed <= interval_time  →  cached value returned, no bus activity
+  elapsed >  interval_time  →  fresh Modbus FC 0x03 transaction on RS485
+
+This has two practical consequences:
+
+  1.  Setting interval_time to match your application's intended poll rate is
+      the right trade-off.  If your application reads every second, setting
+      interval_time = 1000 ms means the bus is hit once per second at most,
+      even if multiple processes are reading.
+
+  2.  Setting interval_time much lower than your poll rate wastes nothing —
+      reads within the window are free (no bus traffic, no mutex contention).
+      Setting it to 0 forces a fresh bus read on every call, which maximises
+      bus load and should only be used when fresh data is strictly required
+      every single call.
+
+  Rule of thumb:
+    interval_time  ≥  your application's sleep()/nanosleep() interval
+
+------------------------------------------------------------------------------
+  11.2  timeout
+------------------------------------------------------------------------------
+
+timeout controls how long the driver waits for a Modbus slave response
+during a cache-miss transaction.  If no response arrives within timeout ms,
+the driver returns ETIMEDOUT.  The cache timestamp is NOT updated on a
+failed read, so the next call will retry immediately.
+
+  Default (100 ms) is adequate for a local RS485 bus at 9600 baud.
+  Increase it if:
+    - The slave device is slow to respond (e.g. processing-heavy firmware).
+    - Long cable runs introduce propagation delay (uncommon at 9600 baud).
+  Decrease it if fast failure detection is needed over a known-reliable bus.
+
+------------------------------------------------------------------------------
+  11.3  Configure parameters externally, not hardcoded in the read loop
+------------------------------------------------------------------------------
+
+In main.c the calls:
+
+  write_config(CO_SENSOR, TIMEOUT_FUNC,   100);
+  write_config(CO_SENSOR, INTERVAL_FUNC, 1000);
+
+are performed once at startup.  While this works for a fixed application, a
+better practice is to configure these parameters from a SEPARATE program or
+shell script before launching the read application.
+
+Reasons:
+  - The read application should only read.  Mixing configuration into the
+    read loop couples concerns and makes parameters harder to change at
+    runtime without recompiling.
+  - The sysfs interface accepts plain ASCII decimals and requires no binary
+    framing, making it ideal for a configuration step.
+  - Parameters can then be adjusted at any time (even while the reader is
+    running) without touching the reading application.
+
+Simple shell-based configuration (run once before starting main_app):
+
+  #!/bin/sh
+  # Configure co_sensor
+  echo 1000 | sudo tee /sys/class/modbusclass/co_sensor/interval_time
+  echo 100  | sudo tee /sys/class/modbusclass/co_sensor/timeout
+
+  # Configure pm_sensor
+  echo 1000 | sudo tee /sys/class/modbusclass/pm_sensor/interval_time
+  echo 100  | sudo tee /sys/class/modbusclass/pm_sensor/timeout
+
+If you prefer a dedicated C utility that accepts values as command-line
+arguments and uses the binary /dev interface (write_config()), that is
+equally valid — the point is to separate configuration from data reading.
+
+
+==============================================================================
+  12. CONCLUSION
+==============================================================================
+
+This application is intentionally minimal.  It demonstrates the essential
+pattern for interacting with the Modbus RTU kernel driver from user-space:
+  - configure driver parameters through the /dev character device write
+    interface or the sysfs interface,
+  - poll sensor data with a simple open → read → close cycle, and
+  - handle errors non-fatally in the polling loop.
+
+It is a starting point, not a production-ready program.  You are free to
+modify, extend, or restructure it to fit your application:
+  - Change or remove the hardcoded parameters and supply them at runtime.
+  - Replace the infinite loop with a finite one, a signal-driven model, or
+    an event-based framework.
+  - Add logging, data filtering, threshold alerting, or network publishing.
+  - Extend to more sensor types by adding new device paths and read functions.
+
+The kernel driver interface (binary frame on /dev, ASCII on sysfs) is stable
+and will remain the same regardless of how you restructure the user-space
+side.
+
+------------------------------------------------------------------------------
+
+Kernel driver source and USERGUIDE:
+  https://github.com/tien-ce/kernel-modulle-raspi4/tree/main/17_modbus_rtu
+
+User-space source:
+  https://github.com/tien-ce/Linux---rasp-user-space/tree/main/05_device_modbus
+
+------------------------------------------------------------------------------
+  Van Tien <tien11102004@gmail.com>
+------------------------------------------------------------------------------
